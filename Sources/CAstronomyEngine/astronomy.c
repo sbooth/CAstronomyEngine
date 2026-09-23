@@ -4,7 +4,7 @@
 
     MIT License
 
-    Copyright (c) 2019-2023 Don Cross <cosinekitty@gmail.com>
+    Copyright (c) 2019-2025 Don Cross <cosinekitty@gmail.com>
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -148,9 +148,9 @@ static stardef_t StarTable[NSTARS];
 
 #define GetStarPointer(body)    (((body) >= BODY_STAR1) && ((body) <= BODY_STAR8) ? &StarTable[(body) - BODY_STAR1] : NULL)
 
-static stardef_t *UserDefinedStar(astro_body_t body)
+static const stardef_t *UserDefinedStar(astro_body_t body)
 {
-    stardef_t *star = GetStarPointer(body);
+    const stardef_t *star = GetStarPointer(body);
     if (star != NULL && star->dist > 0.0)
         return star;
     return NULL;
@@ -1376,7 +1376,7 @@ static void iau2000b(astro_time_t *time)
 {
     /* Truncated and hand-optimized nutation model. */
 
-    if (isnan(time->psi))
+    if ((time != NULL) && isnan(time->psi))
     {
         double t, elp, f, d, om, arg, dp, de, sarg, carg;
 
@@ -1448,6 +1448,8 @@ earth_tilt_t;
 static earth_tilt_t e_tilt(astro_time_t *time)
 {
     earth_tilt_t et;
+
+    /* There is no good answer for what to do if time==NULL. Callers must prevent! */
 
     iau2000b(time);
     et.dpsi = time->psi;
@@ -1662,26 +1664,33 @@ static astro_rotation_t nutation_rot(astro_time_t *time, precess_dir_t dir)
     */
 
     astro_rotation_t rotation;
-    earth_tilt_t tilt = e_tilt(time);
-    double oblm = tilt.mobl * DEG2RAD;
-    double oblt = tilt.tobl * DEG2RAD;
-    double psi = tilt.dpsi * ASEC2RAD;
-    double cobm = cos(oblm);
-    double sobm = sin(oblm);
-    double cobt = cos(oblt);
-    double sobt = sin(oblt);
-    double cpsi = cos(psi);
-    double spsi = sin(psi);
+    earth_tilt_t tilt;
+    double oblm, oblt, psi, cobm, sobm, cobt, sobt, cpsi, spsi;
+    double xx, yx, zx, xy, yy, zy, xz, yz, zz;
 
-    double xx = cpsi;
-    double yx = -spsi * cobm;
-    double zx = -spsi * sobm;
-    double xy = spsi * cobt;
-    double yy = cpsi * cobm * cobt + sobm * sobt;
-    double zy = cpsi * sobm * cobt - cobm * sobt;
-    double xz = spsi * sobt;
-    double yz = cpsi * cobm * sobt - sobm * cobt;
-    double zz = cpsi * sobm * sobt + cobm * cobt;
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
+
+    tilt = e_tilt(time);
+    oblm = tilt.mobl * DEG2RAD;
+    oblt = tilt.tobl * DEG2RAD;
+    psi = tilt.dpsi * ASEC2RAD;
+    cobm = cos(oblm);
+    sobm = sin(oblm);
+    cobt = cos(oblt);
+    sobt = sin(oblt);
+    cpsi = cos(psi);
+    spsi = sin(psi);
+
+    xx = cpsi;
+    yx = -spsi * cobm;
+    zx = -spsi * sobm;
+    xy = spsi * cobt;
+    yy = cpsi * cobm * cobt + sobm * sobt;
+    zy = cpsi * sobm * cobt - cobm * sobt;
+    xz = spsi * sobt;
+    yz = cpsi * cobm * sobt - sobm * cobt;
+    zz = cpsi * sobm * sobt + cobm * cobt;
 
     if (dir == FROM_2000)
     {
@@ -1771,11 +1780,15 @@ static double era(double ut)        /* Earth Rotation Angle */
  *      The parameter is passed by address because it can be modified by the call:
  *      As an optimization, this function caches the sidereal time value in `time`,
  *      unless it has already been cached, in which case the cached value is reused.
+ *      If the `time` pointer is NULL, this function returns a NAN value.
  *
  * @returns {number}
  */
 double Astronomy_SiderealTime(astro_time_t *time)
 {
+    if (time == NULL)
+        return NAN;
+
     if (isnan(time->st))
     {
         double t = time->tt / 36525.0;
@@ -1802,7 +1815,7 @@ static astro_observer_t inverse_terra(const double ovec[3], double st)
 {
     double x, y, z, p, F, W, D, c, s, c2, s2;
     double lon_deg, lat_deg, lat, radicand, factor, denom, adjust;
-    double height_km, stlocl;
+    double height_km, stlocl, distance_au;
     astro_observer_t observer;
     int count;
 
@@ -1834,6 +1847,9 @@ static astro_observer_t inverse_terra(const double ovec[3], double st)
         F = EARTH_FLATTENING * EARTH_FLATTENING;
         /* Start with initial latitude estimate, based on a spherical Earth. */
         lat = atan2(z, p);
+        distance_au = sqrt(ovec[0]*ovec[0] + ovec[1]*ovec[1] + ovec[2]*ovec[2]);
+        if (distance_au < 1.0)
+            distance_au = 1.0;
         for (count = 0; ; ++count)
         {
             if (count > 10)
@@ -1852,7 +1868,7 @@ static astro_observer_t inverse_terra(const double ovec[3], double st)
             radicand = c2 + F*s2;
             denom = sqrt(radicand);
             W = (factor*s*c)/denom - z*c + p*s;
-            if (fabs(W) < 1.0e-8)
+            if (fabs(W) < distance_au * 2.0e-8)
                 break;  /* The error is now negligible. */
             /* Error is still too large. Find the next estimate. */
             /* Calculate D = the derivative of W with respect to lat. */
@@ -1912,10 +1928,17 @@ static void geo_pos(astro_time_t *time, astro_observer_t observer, double pos[3]
     double gast;
     double pos1[3], pos2[3];
 
-    gast = Astronomy_SiderealTime(time);
-    terra(observer, gast, pos1, NULL);
-    nutation(pos1, time, INTO_2000, pos2);
-    precession(pos2, *time, INTO_2000, pos);
+    if (time == NULL)
+    {
+        pos[0] = pos[1] = pos[2] = NAN;
+    }
+    else
+    {
+        gast = Astronomy_SiderealTime(time);
+        terra(observer, gast, pos1, NULL);
+        nutation(pos1, time, INTO_2000, pos2);
+        precession(pos2, *time, INTO_2000, pos);
+    }
 }
 
 static void spin(double angle, const double pos1[3], double vec2[3])
@@ -3951,7 +3974,7 @@ static body_state_t *GravSimBodyStatePtr(astro_grav_sim_t *sim, astro_body_t bod
 
 static astro_state_vector_t GravSimOriginState(astro_grav_sim_t *sim)
 {
-    body_state_t *optr;
+    const body_state_t *optr;
     astro_time_t time = sim->curr->time;
 
     if (sim->originBody == BODY_SSB)
@@ -5045,7 +5068,7 @@ astro_vector_t Astronomy_HelioVector(astro_body_t body, astro_time_t time)
 {
     astro_vector_t vector, earth;
     body_state_t bstate;
-    stardef_t *star;
+    const stardef_t *star;
 
     star = UserDefinedStar(body);
     if (star != NULL)
@@ -5141,7 +5164,7 @@ astro_func_result_t Astronomy_HelioDistance(astro_body_t body, astro_time_t time
 {
     astro_vector_t vector;
     astro_func_result_t result;
-    stardef_t *star;
+    const stardef_t *star;
 
     star = UserDefinedStar(body);
     if (star != NULL)
@@ -6059,6 +6082,9 @@ astro_equatorial_t Astronomy_Equator(
     double temp[3];
     double datevect[3];
 
+    if (time == NULL)
+        return EquError(ASTRO_INVALID_PARAMETER);
+
     /* Calculate the geocentric location of the observer. */
     geo_pos(time, observer, gc_observer);
 
@@ -6133,6 +6159,9 @@ astro_vector_t Astronomy_ObserverVector(
 {
     astro_vector_t vec;
     double gast, pos[3], temp[3];
+
+    if (time == NULL)
+        return VecError(ASTRO_INVALID_PARAMETER, TimeError());
 
     gast = Astronomy_SiderealTime(time);
     terra(observer, gast, pos, NULL);
@@ -6210,6 +6239,9 @@ astro_state_vector_t Astronomy_ObserverState(
 {
     astro_state_vector_t state;
     double gast, pos[3], vel[3], postemp[3], veltemp[3];
+
+    if (time == NULL)
+        return StateVecError(ASTRO_INVALID_PARAMETER, TimeError());
 
     gast = Astronomy_SiderealTime(time);
     terra(observer, gast, pos, vel);
@@ -6373,7 +6405,11 @@ double Astronomy_ObserverGravity(double latitude, double height)
  *      The body's apparent horizontal coordinates and equatorial coordinates, both optionally corrected for refraction.
  */
 astro_horizon_t Astronomy_Horizon(
-    astro_time_t *time, astro_observer_t observer, double ra, double dec, astro_refraction_t refraction)
+    astro_time_t *time,
+    astro_observer_t observer,
+    double ra,
+    double dec,
+    astro_refraction_t refraction)
 {
     astro_horizon_t hor;
     double latrad, lonrad, decrad, rarad;
@@ -6382,6 +6418,17 @@ astro_horizon_t Astronomy_Horizon(
     double p[3], pz, pn, pw, proj;
     double az, zd;
     double spin_angle;
+
+    if (time == NULL)
+    {
+        /* The best we can do is return an invalid state. */
+        /* It would break external dependencies to expect them to check for errors. */
+        hor.altitude = NAN;
+        hor.azimuth = NAN;
+        hor.ra = NAN;
+        hor.dec = NAN;
+        return hor;
+    }
 
     latrad = observer.latitude * DEG2RAD;
     lonrad = observer.longitude * DEG2RAD;
@@ -6992,8 +7039,11 @@ static int QuadInterp(
 
 static astro_status_t FindSeasonChange(double targetLon, int year, int month, int day, astro_time_t *time)
 {
-    astro_time_t startTime = Astronomy_MakeTime(year, month, day, 0, 0, 0.0);
-    astro_search_result_t result = Astronomy_SearchSunLongitude(targetLon, startTime, 20.0);
+    astro_time_t startTime;
+    astro_search_result_t result;
+
+    startTime = Astronomy_MakeTime(year, month, day, 0, 0, 0.0);
+    result = Astronomy_SearchSunLongitude(targetLon, startTime, 20.0);
     *time = result.time;
     return result.status;
 }
@@ -7919,6 +7969,9 @@ astro_func_result_t Astronomy_HourAngle(astro_body_t body, astro_time_t *time, a
     astro_func_result_t result;
     astro_equatorial_t ofdate;
     double gast;
+
+    if (time == NULL)
+        return FuncError(ASTRO_INVALID_PARAMETER);
 
     /* Calculate Greenwich Apparent Sidereal Time (GAST) at the given time. */
     gast = Astronomy_SiderealTime(time);
@@ -10151,6 +10204,9 @@ astro_rotation_t Astronomy_Rotation_EQJ_EQD(astro_time_t *time)
 {
     astro_rotation_t prec, nut;
 
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
+
     prec = precession_rot(*time, FROM_2000);
     nut = nutation_rot(time, FROM_2000);
     return Astronomy_CombineRotation(prec, nut);
@@ -10175,6 +10231,9 @@ astro_rotation_t Astronomy_Rotation_EQJ_EQD(astro_time_t *time)
 astro_rotation_t Astronomy_Rotation_EQJ_ECT(astro_time_t *time)
 {
     astro_rotation_t rot, step;
+
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
 
     rot = Astronomy_Rotation_EQJ_EQD(time);
     step = Astronomy_Rotation_EQD_ECT(time);
@@ -10201,6 +10260,9 @@ astro_rotation_t Astronomy_Rotation_ECT_EQJ(astro_time_t *time)
 {
     astro_rotation_t rot, step;
 
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
+
     rot = Astronomy_Rotation_ECT_EQD(time);
     step = Astronomy_Rotation_EQD_EQJ(time);
     return Astronomy_CombineRotation(rot, step);
@@ -10225,6 +10287,9 @@ astro_rotation_t Astronomy_Rotation_ECT_EQJ(astro_time_t *time)
 astro_rotation_t Astronomy_Rotation_EQD_EQJ(astro_time_t *time)
 {
     astro_rotation_t prec, nut;
+
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
 
     nut = nutation_rot(time, INTO_2000);
     prec = precession_rot(*time, INTO_2000);
@@ -10260,6 +10325,9 @@ astro_rotation_t Astronomy_Rotation_EQD_HOR(astro_time_t *time, astro_observer_t
     double uze[3], une[3], uwe[3];
     double uz[3], un[3], uw[3];
     double spin_angle;
+
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
 
     double sinlat = sin(observer.latitude * DEG2RAD);
     double coslat = cos(observer.latitude * DEG2RAD);
@@ -10339,6 +10407,9 @@ astro_rotation_t Astronomy_Rotation_HOR_EQJ(astro_time_t *time, astro_observer_t
 {
     astro_rotation_t hor_eqd, eqd_eqj;
 
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
+
     hor_eqd = Astronomy_Rotation_HOR_EQD(time, observer);
     eqd_eqj = Astronomy_Rotation_EQD_EQJ(time);
     return Astronomy_CombineRotation(hor_eqd, eqd_eqj);
@@ -10394,6 +10465,9 @@ astro_rotation_t Astronomy_Rotation_EQD_ECL(astro_time_t *time)
     astro_rotation_t eqd_eqj;
     astro_rotation_t eqj_ecl;
 
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
+
     eqd_eqj = Astronomy_Rotation_EQD_EQJ(time);
     eqj_ecl = Astronomy_Rotation_EQJ_ECL();
     return Astronomy_CombineRotation(eqd_eqj, eqj_ecl);
@@ -10445,8 +10519,14 @@ astro_rotation_t Astronomy_Rotation_ECL_EQD(astro_time_t *time)
  */
 astro_rotation_t Astronomy_Rotation_ECL_HOR(astro_time_t *time, astro_observer_t observer)
 {
-    astro_rotation_t ecl_eqd = Astronomy_Rotation_ECL_EQD(time);
-    astro_rotation_t eqd_hor = Astronomy_Rotation_EQD_HOR(time, observer);
+    astro_rotation_t ecl_eqd;
+    astro_rotation_t eqd_hor;
+
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
+
+    ecl_eqd = Astronomy_Rotation_ECL_EQD(time);
+    eqd_hor = Astronomy_Rotation_EQD_HOR(time, observer);
     return Astronomy_CombineRotation(ecl_eqd, eqd_hor);
 }
 
@@ -10574,6 +10654,9 @@ astro_rotation_t Astronomy_Rotation_ECT_EQD(astro_time_t *time)
     earth_tilt_t et;
     double tobl, cos_tobl, sin_tobl;
 
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
+
     /* Find true ecliptic obliquity for this time. */
     et = e_tilt(time);
     tobl = et.tobl * DEG2RAD;
@@ -10620,6 +10703,9 @@ astro_rotation_t Astronomy_Rotation_EQD_ECT(astro_time_t *time)
     astro_rotation_t m;
     earth_tilt_t et;
     double tobl, cos_tobl, sin_tobl;
+
+    if (time == NULL)
+        return RotationErr(ASTRO_INVALID_PARAMETER);
 
     /* Find true ecliptic obliquity for this time. */
     et = e_tilt(time);
@@ -12695,6 +12781,9 @@ static astro_axis_t EarthRotationAxis(astro_time_t *time)
     double pos2[3];
     astro_equatorial_t equ;
 
+    if (time == NULL)
+        return AxisErr(ASTRO_INVALID_PARAMETER, TimeError());
+
     /*
         Unlike the other planets, we have a model of precession and nutation
         for the Earth's axis that provides a north pole vector.
@@ -12763,8 +12852,13 @@ astro_axis_t Astronomy_RotationAxis(astro_body_t body, astro_time_t *time)
     double radlat, radlon, rcoslat;
     double Ja, Jb, Jc, Jd, Je, N;
     double E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11, E12, E13;
-    const double d = time->tt;
-    const double T = d / 36525.0;
+    double d, T;
+
+    if (time == NULL)
+        return AxisErr(ASTRO_INVALID_PARAMETER, TimeError());
+
+    d = time->tt;
+    T = d / 36525.0;
 
     switch (body)
     {
